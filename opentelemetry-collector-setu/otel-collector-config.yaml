@@ -1,0 +1,86 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  batch:
+    send_batch_size: 1024
+    timeout: 5s
+    send_batch_max_size: 2048
+
+  attributes:
+    actions:
+      - key: collector.source
+        value: otel-collector
+        action: upsert
+
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: production
+        action: upsert
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: otel
+    const_labels:
+      collector: otel-collector
+
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+    default_labels_enabled:
+      exporter: false
+
+  otlphttp/traces:
+    endpoint: http://tempo:4318
+
+  logging:
+    verbosity: detailed
+
+connectors:
+  spanmetrics:
+    dimensions:
+      - name: http.method
+      - name: http.status_code
+      - name: rpc.grpc.status_code
+    aggregation_temporality: AGGREGATION_TEMPORALITY_CUMULATIVE
+    metric_conflict_resolution: rename
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, attributes, resource]
+      exporters: [spanmetrics, otlphttp/traces, logging]
+
+    metrics:
+      receivers: [otlp, spanmetrics]
+      processors: [memory_limiter, batch, attributes, resource]
+      exporters: [prometheus, logging]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, attributes, resource]
+      exporters: [loki, logging]
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      address: 0.0.0.0:8888
+
+  extensions: [health_check]
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
