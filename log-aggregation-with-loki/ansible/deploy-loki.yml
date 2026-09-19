@@ -1,0 +1,142 @@
+---
+- name: Deploy Loki and Promtail for log aggregation
+  hosts: loki_servers
+  become: true
+  vars:
+    loki_version: "2.9.4"
+    loki_dir: /opt/loki
+    promtail_dir: /opt/promtail
+    loki_port: 3100
+    promtail_port: 9080
+
+  tasks:
+    - name: Create Loki directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ loki_dir }}"
+        - "{{ loki_dir }}/data"
+        - "{{ loki_dir }}/config"
+
+    - name: Deploy Loki configuration
+      ansible.builtin.copy:
+        src: ../config/loki-config.yml
+        dest: "{{ loki_dir }}/config/loki-config.yml"
+        mode: "0644"
+      notify: Restart loki
+
+    - name: Create Promtail directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ promtail_dir }}"
+        - "{{ promtail_dir }}/config"
+
+    - name: Deploy Promtail configuration
+      ansible.builtin.template:
+        src: ../config/promtail-config.yml
+        dest: "{{ promtail_dir }}/config/promtail-config.yml"
+        mode: "0644"
+      vars:
+        loki_url: "http://127.0.0.1:{{ loki_port }}"
+      notify: Restart promtail
+
+    - name: Create Loki systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/loki.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Loki Log Aggregation
+          After=network.target
+          [Service]
+          ExecStart=/usr/local/bin/loki -config.file={{ loki_dir }}/config/loki-config.yml
+          Restart=always
+          RestartSec=5
+          LimitNOFILE=65536
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart loki
+
+    - name: Create Promtail systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/promtail.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Promtail Log Shipper
+          After=network.target loki.service
+          [Service]
+          ExecStart=/usr/local/bin/promtail -config.file={{ promtail_dir }}/config/promtail-config.yml
+          Restart=always
+          RestartSec=5
+          LimitNOFILE=65536
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart promtail
+
+    - name: Download Loki binary
+      ansible.builtin.get_url:
+        url: "https://github.com/grafana/loki/releases/download/v{{ loki_version }}/loki-linux-amd64.zip"
+        dest: /tmp/loki.zip
+        mode: "0755"
+      register: loki_download
+
+    - name: Install Loki binary
+      ansible.builtin.unarchive:
+        src: /tmp/loki.zip
+        dest: /usr/local/bin
+        remote_src: true
+      when: loki_download.changed
+      notify: Restart loki
+
+    - name: Download Promtail binary
+      ansible.builtin.get_url:
+        url: "https://github.com/grafana/loki/releases/download/v{{ loki_version }}/promtail-linux-amd64.zip"
+        dest: /tmp/promtail.zip
+        mode: "0755"
+      register: promtail_download
+
+    - name: Install Promtail binary
+      ansible.builtin.unarchive:
+        src: /tmp/promtail.zip
+        dest: /usr/local/bin
+        remote_src: true
+      when: promtail_download.changed
+      notify: Restart promtail
+
+    - name: Ensure Loki and Promtail are running
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+        daemon_reload: true
+      loop:
+        - loki
+        - promtail
+
+    - name: Verify Loki is healthy
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ loki_port }}/ready"
+        status_code: 200
+      register: health
+      until: health.status == 200
+      retries: 10
+      delay: 5
+
+  handlers:
+    - name: Restart loki
+      ansible.builtin.systemd:
+        name: loki
+        state: restarted
+        daemon_reload: true
+
+    - name: Restart promtail
+      ansible.builtin.systemd:
+        name: promtail
+        state: restarted
+        daemon_reload: true
